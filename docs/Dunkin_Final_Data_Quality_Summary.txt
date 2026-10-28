@@ -1,0 +1,21 @@
+DUNKIN 24-STORE FINAL DATA QUALITY REPORT
+============================================================
+
+CSV files: 24 / 24
+Transactions: 400,000 / 400,000
+Missing values: 0
+Duplicate Order_IDs within files: 0
+Duplicate Order_IDs across stores: 378,000
+Missing Transaction_IDs: 0
+Duplicate Transaction_IDs globally: 0
+Unique Transaction_IDs globally: 400,000
+Invalid quantities: 0
+Invalid prices: 0
+Invalid sales amounts: 0
+Invalid dates: 0
+Invalid timestamps: 0
+Invalid Store_ID values: 0
+Store consistency issues: 0
+Stores found: 24 / 24
+
+OVERALL STATUS: PASS

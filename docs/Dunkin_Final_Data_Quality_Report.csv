@@ -1,0 +1,19 @@
+Metric,Value
+CSV Files,24
+Total Transactions,400000
+Missing Values,0
+Duplicate Order_IDs Within Files,0
+Duplicate Order_IDs Across Stores,378000
+Missing Transaction_IDs,0
+Duplicate Transaction_IDs Globally,0
+Unique Transaction_IDs Globally,400000
+Invalid Quantities,0
+Invalid Prices,0
+Invalid Sales Amounts,0
+Invalid Dates,0
+Invalid Timestamps,0
+Invalid Store_ID,0
+Store Consistency Issues,0
+Stores Found,24
+Expected Stores,24
+Overall Status,PASS

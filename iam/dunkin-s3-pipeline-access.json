@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListOnlyPipelineFolders",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::pooja-dunkin-data-engineering-2026",
+      "Condition": {
+        "StringLike": { "s3:prefix": ["Raw/sales*", "processed*", "data-quality*"] }
+      }
+    },
+    {
+      "Sid": "ReadRawOnly",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::pooja-dunkin-data-engineering-2026/Raw/sales/*"
+    },
+    {
+      "Sid": "WriteProcessedAndDataQuality",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": [
+        "arn:aws:s3:::pooja-dunkin-data-engineering-2026/processed/*",
+        "arn:aws:s3:::pooja-dunkin-data-engineering-2026/data-quality/*"
+      ]
+    }
+  ]
+}

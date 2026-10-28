@@ -1,0 +1,13 @@
+# Full dataset is not committed (only data/sample/ is)
+*.csv
+!data/sample/*.csv
+!docs/*.csv
+*.xlsx
+*.numbers
+*.zip
+
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.env
