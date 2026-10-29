@@ -18,3 +18,4 @@ When adding new ones, crop out or blur the **12-digit account ID** (top-right me
 | [`11-iam-role-permissions.png`](11-iam-role-permissions.png) | `dunkin-glue-etl-role` with its two policies | ✅ |
 | [`12-e8-anomalies.png`](12-e8-anomalies.png) | E8: 33 anomalous store-days | ✅ |
 | [`13-eventbridge-failure-rule.png`](13-eventbridge-failure-rule.png) | EventBridge rule pattern for Glue job failures | ✅ |
+| [`14-glue-workflow-run.png`](14-glue-workflow-run.png) | Glue workflow run (CloudFormation stack): crawler → ETL, all steps succeeded, 3 min 48 s | ✅ |

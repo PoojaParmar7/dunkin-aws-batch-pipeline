@@ -19,7 +19,9 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 # ---------------------------------------------------------------- 1. Settings
-BUCKET = "s3://pooja-dunkin-data-engineering-2026"
+# The CloudFormation stack passes --BUCKET; the console-built job uses the original bucket.
+BUCKET = (getResolvedOptions(sys.argv, ["BUCKET"])["BUCKET"] if "--BUCKET" in sys.argv
+          else "s3://pooja-dunkin-data-engineering-2026").rstrip("/")
 RAW_PATH = f"{BUCKET}/Raw/sales/"            # capital R, as in the bucket
 PROCESSED_PATH = f"{BUCKET}/processed/sales/"
 EXPECTED_FILES = 24

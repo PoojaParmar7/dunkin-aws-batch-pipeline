@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Dunkin' sales batch pipeline (simulated data): S3 bucket, least-privilege Glue role,
+  crawler, PySpark ETL job, Athena table + workgroup, Glue workflow (crawler -> ETL),
+  EventBridge failure rules and SNS email alerts. Deploy with scripts/deploy.sh.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address that receives failure alerts (confirm the subscription email).
+  NameSuffix:
+    Type: String
+    Default: "-cfn"
+    Description: Added to resource names so this stack can live next to the console-built setup.
+  ScheduleEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "true = run crawler -> ETL automatically on ScheduleCron. false = on demand only (no ongoing cost)."
+  ScheduleCron:
+    Type: String
+    Default: "cron(0 6 * * ? *)"
+    Description: When to run if ScheduleEnabled=true (UTC). Default is daily at 06:00 UTC.
+
+Conditions:
+  UseSchedule: !Equals [!Ref ScheduleEnabled, "true"]
+
+Resources:
+  # ------------------------------------------------------------------ Storage
+  # One bucket, separated by prefix: Raw/sales/, processed/sales/, data-quality/, athena-results/, scripts/
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "dunkin-pipeline${NameSuffix}-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-athena-results
+            Status: Enabled
+            Prefix: athena-results/
+            ExpirationInDays: 7
+
+  # ------------------------------------------------------------------ IAM (same rules as iam/dunkin-s3-pipeline-access.json)
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "dunkin-glue-etl-role${NameSuffix}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: glue.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: dunkin-s3-pipeline-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListOnlyPipelineFolders
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: ["Raw/sales*", "processed*", "data-quality*", "scripts*"]
+              - Sid: ReadRawAndScriptOnly
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub "${DataBucket.Arn}/Raw/sales/*"
+                  - !Sub "${DataBucket.Arn}/scripts/*"
+              - Sid: WriteProcessedAndDataQuality
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource:
+                  - !Sub "${DataBucket.Arn}/processed/*"
+                  - !Sub "${DataBucket.Arn}/data-quality/*"
+
+  # ------------------------------------------------------------------ Catalog
+  SalesDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Join ["", ["dunkin_sales_db", !Join ["_", !Split ["-", !Ref NameSuffix]]]]
+
+  # Same table as sql/02_ddl/create_sales_processed.sql (partition projection, no crawler needed)
+  SalesProcessedTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref SalesDatabase
+      TableInput:
+        Name: sales_processed
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: parquet
+          projection.enabled: "true"
+          projection.order_year.type: integer
+          projection.order_year.range: "2024,2030"
+          projection.order_month.type: integer
+          projection.order_month.range: "1,12"
+        PartitionKeys:
+          - { Name: order_year, Type: int }
+          - { Name: order_month, Type: int }
+        StorageDescriptor:
+          Location: !Sub "s3://${DataBucket}/processed/sales/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - { Name: transaction_id, Type: string }
+            - { Name: order_id, Type: string }
+            - { Name: store_id, Type: string }
+            - { Name: store_name, Type: string }
+            - { Name: order_date, Type: date }
+            - { Name: order_timestamp, Type: timestamp }
+            - { Name: delivered_timestamp, Type: timestamp }
+            - { Name: order_channel, Type: string }
+            - { Name: payment_method, Type: string }
+            - { Name: product_category, Type: string }
+            - { Name: item, Type: string }
+            - { Name: quantity, Type: int }
+            - { Name: unit_price_usd, Type: "decimal(12,2)" }
+            - { Name: gross_sales_usd, Type: "decimal(12,2)" }
+            - { Name: discount_usd, Type: "decimal(12,2)" }
+            - { Name: subtotal_usd, Type: "decimal(12,2)" }
+            - { Name: nj_sales_tax_usd, Type: "decimal(12,2)" }
+            - { Name: total_sales_usd, Type: "decimal(12,2)" }
+            - { Name: order_to_delivery_minutes, Type: int }
+            - { Name: store_number, Type: int }
+            - { Name: order_hour, Type: int }
+            - { Name: day_of_week, Type: string }
+            - { Name: day_of_week_num, Type: int }
+            - { Name: source_file, Type: string }
+            - { Name: run_id, Type: string }
+            - { Name: processed_at, Type: timestamp }
+
+  # Registers the raw CSVs as table "sales" (named after the Raw/sales/ folder)
+  SalesCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "dunkin-sales-crawler${NameSuffix}"
+      Role: !GetAtt GlueRole.Arn
+      DatabaseName: !Ref SalesDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DataBucket}/Raw/sales/"
+      RecrawlPolicy: { RecrawlBehavior: CRAWL_EVERYTHING }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # ------------------------------------------------------------------ ETL
+  SalesEtlJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "dunkin-sales-etl${NameSuffix}"
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "5.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2          # cost guard: the minimum
+      Timeout: 15                 # minutes; a stuck job can't run up costs
+      MaxRetries: 0
+      ExecutionProperty: { MaxConcurrentRuns: 1 }
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${DataBucket}/scripts/dunkin_sales_etl.py"   # uploaded by deploy.sh
+      DefaultArguments:
+        "--BUCKET": !Sub "s3://${DataBucket}"
+        "--job-bookmark-option": job-bookmark-disable
+        "--enable-continuous-cloudwatch-log": "true"
+
+  # ------------------------------------------------------------------ Orchestration: crawler -> ETL in one trigger
+  PipelineWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: !Sub "dunkin-pipeline${NameSuffix}"
+      Description: Crawl raw CSVs, then run the ETL + data-quality job if the crawl succeeded.
+      MaxConcurrentRuns: 1
+
+  StartTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub "dunkin-start${NameSuffix}"
+      WorkflowName: !Ref PipelineWorkflow
+      Type: !If [UseSchedule, SCHEDULED, ON_DEMAND]
+      Schedule: !If [UseSchedule, !Ref ScheduleCron, !Ref AWS::NoValue]
+      StartOnCreation: !If [UseSchedule, true, !Ref AWS::NoValue]
+      Actions:
+        - CrawlerName: !Ref SalesCrawler
+
+  EtlAfterCrawlTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub "dunkin-etl-after-crawl${NameSuffix}"
+      WorkflowName: !Ref PipelineWorkflow
+      Type: CONDITIONAL
+      StartOnCreation: true
+      Predicate:
+        Conditions:
+          - CrawlerName: !Ref SalesCrawler
+            CrawlState: SUCCEEDED
+            LogicalOperator: EQUALS
+      Actions:
+        - JobName: !Ref SalesEtlJob
+
+  # ------------------------------------------------------------------ Athena
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "dunkin${NameSuffix}"
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        BytesScannedCutoffPerQuery: 1073741824     # 1 GB per query: cost guard
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${DataBucket}/athena-results/"
+
+  # ------------------------------------------------------------------ Monitoring
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "dunkin-pipeline-alerts${NameSuffix}"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+
+  # Same pattern as monitoring/eventbridge-glue-job-failed.json
+  JobFailedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "dunkin-glue-job-failed${NameSuffix}"
+      EventPattern:
+        source: [aws.glue]
+        detail-type: [Glue Job State Change]
+        detail:
+          jobName: [!Ref SalesEtlJob]
+          state: [FAILED, TIMEOUT, STOPPED]
+      Targets:
+        - Id: sns-alert
+          Arn: !Ref AlertTopic
+
+  CrawlerFailedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "dunkin-glue-crawler-failed${NameSuffix}"
+      EventPattern:
+        source: [aws.glue]
+        detail-type: [Glue Crawler State Change]
+        detail:
+          crawlerName: [!Ref SalesCrawler]
+          state: [Failed]
+      Targets:
+        - Id: sns-alert
+          Arn: !Ref AlertTopic
+
+Outputs:
+  BucketName:
+    Value: !Ref DataBucket
+  DatabaseName:
+    Value: !Ref SalesDatabase
+  WorkflowName:
+    Value: !Ref PipelineWorkflow
+  JobName:
+    Value: !Ref SalesEtlJob
+  CrawlerName:
+    Value: !Ref SalesCrawler
+  AthenaWorkGroup:
+    Value: !Ref AthenaWorkGroup
+  AlertTopicArn:
+    Value: !Ref AlertTopic

@@ -50,7 +50,8 @@ s3://pooja-dunkin-data-engineering-2026/
 | **C. Transformation** | Clean, type and enrich | Glue PySpark job: string → `date`/`timestamp`/`int`/`decimal(12,2)`; adds `order_hour`, `day_of_week`, `store_number`, lineage columns; writes Snappy Parquet partitioned by year/month |
 | **D. Data quality** | Repeatable checks on every run | ~40 rules (critical / error / warning); per-run report keyed by `RUN_ID`; bad rows quarantined, never silently dropped; job stops before writing if a critical check fails |
 | **E. Analytics** | Business questions in SQL | Athena over `sales_processed` (partition projection, no crawler needed) |
-| **F. Monitoring** | Failure alerting | EventBridge rule on Glue job state `FAILED` / `TIMEOUT` / `STOPPED` → SNS email; covers data-quality failures too, because a failed critical check fails the job. Tested end to end. See [monitoring/](monitoring). *Scheduling: see [Roadmap](#roadmap)* |
+| **F. Monitoring** | Failure alerting | EventBridge rule on Glue job state `FAILED` / `TIMEOUT` / `STOPPED` → SNS email; covers data-quality failures too, because a failed critical check fails the job. Tested end to end. See [monitoring/](monitoring) |
+| **G. Deployment and orchestration** | Everything as code | CloudFormation template creates all resources; a Glue workflow runs crawler → ETL from one trigger (optional schedule). See [Deploy in one command](#deploy-in-one-command) |
 
 ---
 
@@ -67,6 +68,7 @@ s3://pooja-dunkin-data-engineering-2026/
 | Cost per batch run | 0.0736 DPU-hours × $0.44 ≈ **$0.03** |
 | Idempotency | Repeated runs → identical output, no duplicates; a deliberately stopped run was fully recovered by one rerun |
 | Failure alert | Test run stopped → `STOPPED` email delivered via EventBridge → SNS within seconds |
+| Deploy as code | `deploy.py` created the full CloudFormation stack in one command; `run.py`: Glue workflow (crawler → ETL) completed in ≈ 4 min (ETL 125 s), P1 reconciliation all PASS; `teardown.py` removed the whole stack (2026-10-29) |
 
 Details: [data quality](docs/data-quality.md) · [cost and cleanup](docs/cost-and-cleanup.md)
 
@@ -120,6 +122,7 @@ Validation SQL: [raw](sql/01_raw_validation) · [processed](sql/03_processed_val
 
 ```
 ├── README.md
+├── infra/pipeline.yaml                   CloudFormation: the whole pipeline as code
 ├── glue_jobs/dunkin_sales_etl.py         Glue 5.0 PySpark ETL + data-quality job
 ├── sql/
 │   ├── 01_raw_validation/                V1–V3: Athena checks on the raw CSV table
@@ -128,7 +131,7 @@ Validation SQL: [raw](sql/01_raw_validation) · [processed](sql/03_processed_val
 │   └── 04_analytics/                     E1–E8 business queries
 ├── iam/                                  Least-privilege S3 policy for the ETL role
 ├── monitoring/                           EventBridge pattern + SNS failure-alert setup
-├── scripts/cloudshell_checks.sh          Read-only AWS CLI diagnostics
+├── scripts/                              deploy.py / run.py / teardown.py (boto3) + read-only cloudshell_checks.sh
 ├── local_prep/                           pandas scripts: validation, timestamp fixes, Transaction_ID
 ├── data/sample/                          100-row sample of one store file
 └── docs/                                 Data dictionary, data quality, troubleshooting, cost, screenshots
@@ -136,7 +139,32 @@ Validation SQL: [raw](sql/01_raw_validation) · [processed](sql/03_processed_val
 
 ---
 
-## How to reproduce
+## Deploy in one command
+
+The whole pipeline is defined as code in [`infra/pipeline.yaml`](infra/pipeline.yaml) (AWS CloudFormation): bucket, least-privilege IAM role, crawler, Glue ETL job, `sales_processed` table, Athena workgroup, **Glue workflow (crawler → ETL in one trigger)**, EventBridge failure rules and SNS alerts. Resource names end in `-cfn`, so the stack lives next to the console-built setup.
+
+In AWS CloudShell (us-east-2), from the repo folder:
+
+```bash
+python3 scripts/deploy.py you@example.com   # create/update the stack, upload the ETL script and the 24 CSVs
+python3 scripts/run.py                      # crawler -> ETL, then reconciles the result in Athena (~$0.10)
+```
+
+The scripts use Python + boto3 (both preinstalled in CloudShell).
+
+- Confirm the SNS subscription email once to receive failure alerts.
+- Optional daily schedule (06:00 UTC): `python3 scripts/deploy.py you@example.com --schedule on`. Off by default, so nothing runs or costs money unless started.
+- CSVs come from the original bucket by default; pass a local folder as the second argument instead.
+
+Teardown (empties the stack's bucket and deletes every stack resource; original setup untouched):
+
+```bash
+python3 scripts/teardown.py
+```
+
+---
+
+## How to reproduce (manual console steps)
 
 1. Create an S3 bucket (Block Public Access on) and upload the 24 CSVs to `Raw/sales/`.
 2. Glue → Crawlers: target `s3://<bucket>/Raw/sales/` (**case-sensitive**), output database `dunkin_sales_db`. Run it.
@@ -170,6 +198,9 @@ Problems met along the way and how they were solved: [docs/troubleshooting.md](d
 
 **Failure alerting:** EventBridge rule pattern (tested: a stopped run triggered an SNS email)
 ![EventBridge failure rule](docs/screenshots/13-eventbridge-failure-rule.png)
+
+**Orchestration (deployed with CloudFormation):** Glue workflow run, crawler → ETL from one trigger, all steps succeeded in 3 min 48 s
+![Glue workflow run](docs/screenshots/14-glue-workflow-run.png)
 
 **Processed table reconciliation (P1):** one run, 400,000 rows, 24 stores, revenue identical to raw
 ![Processed reconciliation](docs/screenshots/08-athena-processed-check.png)
@@ -212,7 +243,8 @@ The **architecture** is serverless and distributed, so it scales horizontally. T
 ## Roadmap
 
 - [x] **Alerting:** EventBridge rule on Glue job state `FAILED` / `TIMEOUT` / `STOPPED` → SNS email
-- [ ] **Orchestration and scheduling:** Glue workflow to run crawler → ETL, with a scheduled trigger
+- [x] **Deployment as code:** CloudFormation stack + Python (boto3) deploy / run / teardown scripts
+- [x] **Orchestration and scheduling:** Glue workflow runs crawler → ETL; optional daily schedule (off by default)
 - [ ] **Quality trend table:** Athena table over `data-quality/runs/` to compare runs over time
 - [ ] **Incremental loads:** process only new files (Glue job bookmarks) instead of full refresh
 - [ ] **Dashboard:** Amazon QuickSight or Power BI on top of `sales_processed`
