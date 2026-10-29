@@ -11,3 +11,8 @@ __pycache__/
 *.pyc
 .venv/
 .env
+
+# Personal job-application files (never commit)
+Pooja_Parmar_*
+build_resume*.py
+build_cover_letter.py
